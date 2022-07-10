@@ -28,10 +28,10 @@ def create_inventory(bucket_name, prefix):
         global monitor
         reference = 0
         while monitor:
-            if (object_count - reference) >= 1000:
-                print(".", end="", flush=True)
+            if offset:= object_count - reference:
+                print("." * int(offset / 10000), end="", flush=True, file=sys.stderr)
             reference = object_count
-            sleep(0.5)
+            sleep(5)
 
     s3 = client('s3')
     paginator = s3.get_paginator('list_objects')
@@ -41,17 +41,17 @@ def create_inventory(bucket_name, prefix):
         print("Creating Inventory", file=sys.stderr)
         Thread(target=progress).start()
         start = datetime.now()
+        file = open(inventory_file, "w")
+        keys = []
 
         for page in page_iterator:
-            keys = []
-            file = open(inventory_file, "w")
             for key in page['Contents']:
                 keys.append('"%s","%d"\n' % (key['Key'], key['Size']))
                 object_count += 1
             
-                if len(keys) >= 1000000:
-                    file.writelines(keys)
-                    keys.clear()
+            if len(keys) >= 10000:
+                file.writelines(keys)
+                keys.clear()
 
         file.writelines(keys)
         file.close()
@@ -61,7 +61,7 @@ def create_inventory(bucket_name, prefix):
              file=sys.stderr)
 
 def process_investory(max_depth):
-    top_level_folders = {}
+    top_level_folders = {"/": 0}
 
     print("Processing Inventory", file=sys.stderr)
     with open(inventory_file) as f:
@@ -74,8 +74,9 @@ def process_investory(max_depth):
                 folder_count <= max_depth else max_depth
 
             for index in range(1, depth + 1):
-                entry = "/".join(folder.split("/")[:index])
+                entry = "/" + "/".join(folder.split("/")[:index]) + "/"
 
+                top_level_folders["/"] += size
                 try:
                     top_level_folders[entry] += size
                 except KeyError:
@@ -83,7 +84,7 @@ def process_investory(max_depth):
 
     print("-" * 40, file=sys.stderr)
     for folder, size in top_level_folders.items():
-        print(f"{convert_bytes(size, 'M'):>15} |", folder)
+        print(f"{convert_bytes(size, 'G'):>15} |", folder)
 
 def parse_bucket_name(name):
     break_down = name.lstrip("s3://").split("/")
