@@ -1,13 +1,12 @@
 #!/usr/bin/env python
 
 import csv
+from copy import copy
 from datetime import datetime
 import gzip
 from  hashlib import md5
 from json import loads
 import os
-from threading import Thread
-from time import sleep
 import sys
 import urllib.parse
 
@@ -60,11 +59,24 @@ def cli():
         print(f"Writing results to out file {out_file}")
         with open(out_file, "w") as csv_file:
             writer = csv.writer(csv_file)
-            writer.writerow(("Folder", "Size", "Count"))
+            writer.writerow((
+                "Folder",
+                "Count",
+                "Size", 
+                "DelSize",
+                "VerSize",
+                "AvgObject",
+                ))
 
-            for key, value in results.items():
-                record = (key, value["Size"], value["Count"])
-                writer.writerow(record)
+            for folder, details in results.items():
+                writer.writerow((
+                    folder,
+                    details["Count"],
+                    details["Size"],
+                    details["DelSize"],
+                    details["VerSize"],
+                    details["AvgObj"],
+                ))
     else:
         print_results(results)
 
@@ -103,10 +115,11 @@ def load_manifest(location: str) -> dict:
 
 
 def process_investory(manifest, max_depth) -> dict:
-    top_level_folders = {"/": {"Size": 0, "Count": 0}}
+    template = {"Count": 0, "DelSize": 0, "Size": 0, "VerSize": 0}
+    top_level_folders = {"/": copy(template)}
     object_count = 0
 
-    print("Processing Inventory", file=sys.stderr)
+    print("Processing Inventory")
     start = datetime.now()
 
     for file in manifest["files"]:
@@ -120,11 +133,18 @@ def process_investory(manifest, max_depth) -> dict:
 
         table = parquet.read_table(BufferReader(data))
 
-        for key, size in zip(table['key'], table['size']):
-            object_count += 1
+        for key, is_latest, is_delete, size in zip(
+                table['key'],
+                table['is_latest'],
+                table['is_delete_marker'],
+                table['size']):
 
+            object_count += 1
             folder = key.as_py()
             size = size.as_py()
+
+            if not size:
+                size = 0
 
             folder_count = folder.count("/")
             depth = folder_count if max_depth == None or \
@@ -134,35 +154,45 @@ def process_investory(manifest, max_depth) -> dict:
             for index in range(1, depth + 1):
                 trim_point = folder.index("/", trim_base)
                 trim_base = trim_point + 1
-                entry = folder[:trim_base] 
+                entry = "/" if index == 1 else folder[:trim_base] 
 
-                if index == 1:
-                    top_level_folders["/"]["Size"] += size
-                    top_level_folders["/"]["Count"] += 1
+                if entry not in top_level_folders: 
+                    top_level_folders[entry] = copy(template)
 
-                try:
-                    top_level_folders[entry]["Size"] += size
-                    top_level_folders[entry]["Count"] += 1
-                except KeyError:
-                    top_level_folders[entry] = {"Size": size, "Count": 1}
+                top_level_folders[entry]["Count"] += 1
+                top_level_folders[entry]["Size"] += size
+
+                if not is_latest:
+                    top_level_folders[entry]["VerSize"] += size
+
+                if not is_delete:
+                    top_level_folders[entry]["DelSize"] += size
 
     duration = datetime.now() - start
     print("Processed %d objects in %d seconds\n" % (object_count,
-                                                   duration.seconds),
-         file=sys.stderr)
+                                                   duration.seconds))
+
+    for folder, details in top_level_folders.items():
+        top_level_folders[folder]["AvgObj"] = details["Size"] / details["Count"]
 
     return top_level_folders
 
 
 def print_results(results: dict) -> None:
-    print(f"{'Total Size':>15} |{'Average':>16} |{'Count':>16} | Folder\n",
-         "-" * 80)
+    print(f"{'Count':>15} |"
+          f"{'Total Size':>16} |"
+          f"{'Ver Size':>16} |"
+          f"{'Del Size':>16} |"
+          f"{'Avg Object':>16} |"
+          " Folder\n", "-" * 120)
 
     for folder, details in results.items():
-        print(f"{convert_bytes(details['Size'], 'G'):>15} | "
-              f"{convert_bytes(details['Size'] / details['Count'], 'K'):>15} |",
-              f"{details['Count']:>15} |",
-              urllib.parse.unquote(folder))
+        print(f"{details['Count']:>15} |",
+             f"{convert_bytes(details['Size'], 'G'):>15} |",
+             f"{convert_bytes(details['DelSize'], 'G'):>15} |",
+             f"{convert_bytes(details['VerSize'], 'G'):>15} |",
+             f"{convert_bytes(details['AvgObj'], 'K'):>15} |",
+             urllib.parse.unquote(folder))
 
 
 def parse_bucket_name(name):
