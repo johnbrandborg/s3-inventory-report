@@ -14,6 +14,7 @@ from pyarrow import BufferReader, parquet
 from boto3 import client
 import botocore.exceptions
 
+file_cache = './cache'
 s3 = client('s3')
 
 
@@ -119,17 +120,30 @@ def process_investory(manifest, max_depth) -> dict:
     top_level_folders = {"/": copy(template)}
     object_count = 0
 
+    if not os.path.isdir(file_cache):
+        os.mkdir(file_cache)
+
     print("Processing Inventory")
     start = datetime.now()
 
     for file in manifest["files"]:
         inventory_bucket = manifest['destinationBucket'].split(":::")[1]
-        print(file['key'])
-        file_object = s3.get_object(Bucket=inventory_bucket, Key=file["key"])
-        data = file_object.get('Body').read()
+        local_file = file_cache + file['key'][file['key'].rindex("/"):]
 
-        if md5(data).hexdigest() != file['MD5checksum']:
-            raise SystemError('The inventory file failed the MD5 Check')
+        if os.path.isfile(local_file):
+            print('Local:', local_file)
+            with open(local_file, 'rb') as file:
+                data = file.read()
+        else:
+            print('S3:', file['key'])
+            file_object = s3.get_object(Bucket=inventory_bucket, Key=file["key"])
+            data = file_object.get('Body').read()
+
+            if md5(data).hexdigest() != file['MD5checksum']:
+                raise SystemError('The inventory file failed the MD5 Check')
+
+            with open(local_file, 'wb') as file:
+                file.write(data)
 
         table = parquet.read_table(BufferReader(data))
 
@@ -162,10 +176,10 @@ def process_investory(manifest, max_depth) -> dict:
                 top_level_folders[entry]["Count"] += 1
                 top_level_folders[entry]["Size"] += size
 
-                if not is_latest:
+                if not is_latest.as_py():
                     top_level_folders[entry]["VerSize"] += size
 
-                if not is_delete:
+                if is_delete.as_py():
                     top_level_folders[entry]["DelSize"] += size
 
     duration = datetime.now() - start
@@ -202,4 +216,3 @@ def parse_bucket_name(name):
 
 if __name__ == "__main__":
     sys.exit(cli())
-
