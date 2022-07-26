@@ -7,6 +7,14 @@ First configure S3 to create inventory for your bucket/s.
 
 https://docs.aws.amazon.com/AmazonS3/latest/userguide/configure-inventory.html
 
+Once completed install the requirements file and use the CLI. Not required if
+running on any platform with Pandas, like Airflow.  This script uses PyArrow
+for loading the CSV, ORC and Parquet files.
+
+```shell
+pip install -r requirements.txt
+```
+
 ## Usage
 
 This tool is a simple CLI script. By default the information is displayed on the screen, but if
