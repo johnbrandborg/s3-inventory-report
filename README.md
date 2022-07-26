@@ -28,3 +28,10 @@ a out file is set a CSV file is created either locally or on S3.
     -c ./cache/
 ```
 
+The CSV will have a header with the following fields:
+ 1. Folder - Name of folder in the S3 Bucket
+ 2. Count - Number of Objects in the folder
+ 3. Size - Total size of the folder.  Current, NonCurrent, and deletion marked
+ 4. DelSize - Total size of the Objects with deletion marker
+ 5. VerSize - Total size of the Objects that are a noncurrent version
+ 6. AvgObject - Average Object size of the objects in the Folder

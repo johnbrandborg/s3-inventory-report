@@ -2,6 +2,7 @@
 
 import argparse
 from copy import copy
+import csv
 from datetime import datetime
 import gzip
 from hashlib import md5
@@ -10,7 +11,7 @@ import os
 import sys
 import urllib.parse
 
-from pyarrow import BufferReader, csv, orc, parquet
+from pyarrow import BufferReader, csv as pa_csv, orc, parquet
 import boto3
 import botocore.exceptions
 
@@ -145,9 +146,9 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
                 "is_delete_marker",
                 "size",
             ]
-            read_options = csv.ReadOptions(column_names=csv_names)
-            table = csv.read_csv(BufferReader(gzip.decompress(data)),
-                                 read_options)
+            read_options = pa_csv.ReadOptions(column_names=csv_names)
+            table = pa_csv.read_csv(BufferReader(gzip.decompress(data)),
+                                    read_options)
         else:
             raise ValueError("Unknown file format")
 
