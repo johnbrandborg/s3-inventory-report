@@ -1,16 +1,15 @@
 #!/usr/bin/env python
 
-import csv
 from copy import copy
 from datetime import datetime
 import gzip
-from  hashlib import md5
+from hashlib import md5
 from json import loads
 import os
 import sys
 import urllib.parse
 
-from pyarrow import BufferReader, parquet
+from pyarrow import BufferReader, csv, orc, parquet
 from boto3 import client
 import botocore.exceptions
 
@@ -19,7 +18,6 @@ s3 = client('s3')
 
 
 def cli():
-    bucket_name = None
     max_depth = None
     out_file = None
 
@@ -38,14 +36,14 @@ def cli():
                 max_depth = int(sys.argv[index + 1])
             except ValueError:
                 print("ERROR: Maximum depth needs to be an integer",
-                     file=sys.stderr)
+                      file=sys.stderr)
                 return 1
         if "-o" == argv:
             out_file = sys.argv[index + 1]
 
     if not manifest_location:
         print("ERROR: An S3 location for the manifest must be supplied",
-             file=sys.stderr)
+              file=sys.stderr)
         return 1
 
     manifest = load_manifest(manifest_location)
@@ -63,7 +61,7 @@ def cli():
             writer.writerow((
                 "Folder",
                 "Count",
-                "Size", 
+                "Size",
                 "DelSize",
                 "VerSize",
                 "AvgObject",
@@ -103,8 +101,10 @@ def load_manifest(location: str) -> dict:
     json_key = prefix + 'manifest.json'
 
     try:
-        manifest_json = s3.get_object(Bucket=bucket, Key=json_key).get('Body').read()
-        manifest_checksum = s3.get_object(Bucket=bucket, Key=checksum_key).get('Body').read()
+        manifest_json = s3.get_object(Bucket=bucket,
+                                      Key=json_key).get('Body').read()
+        manifest_checksum = s3.get_object(Bucket=bucket,
+                                          Key=checksum_key).get('Body').read()
     except botocore.exceptions.ClientError as error:
         print("ERROR:", error, file=sys.stderr)
         sys.exit(1)
@@ -117,7 +117,7 @@ def load_manifest(location: str) -> dict:
 
 def process_investory(manifest, max_depth) -> dict:
     template = {"Count": 0, "DelSize": 0, "Size": 0, "VerSize": 0}
-    top_level_folders = {"/": copy(template)}
+    folders = {"/": copy(template)}
     object_count = 0
 
     if not os.path.isdir(file_cache):
@@ -136,7 +136,8 @@ def process_investory(manifest, max_depth) -> dict:
                 data = file.read()
         else:
             print('S3:', file['key'])
-            file_object = s3.get_object(Bucket=inventory_bucket, Key=file["key"])
+            file_object = s3.get_object(Bucket=inventory_bucket,
+                                        Key=file["key"])
             data = file_object.get('Body').read()
 
             if md5(data).hexdigest() != file['MD5checksum']:
@@ -145,7 +146,24 @@ def process_investory(manifest, max_depth) -> dict:
             with open(local_file, 'wb') as file:
                 file.write(data)
 
-        table = parquet.read_table(BufferReader(data))
+        if manifest["fileFormat"] == 'Parquet':
+            table = parquet.read_table(BufferReader(data))
+        elif manifest["fileFormat"] == 'ORC':
+            table = orc.read_table(BufferReader(data))
+        elif manifest["fileFormat"] == 'CSV':
+            csv_names = [
+                "bucket",
+                "key",
+                "version_id",
+                "is_latest",
+                "is_delete_marker",
+                "size",
+            ]
+            read_options = csv.ReadOptions(column_names=csv_names)
+            table = csv.read_csv(BufferReader(gzip.decompress(data)),
+                                 read_options)
+        else:
+            raise ValueError("Unknown file format")
 
         for key, is_latest, is_delete, size in zip(
                 table['key'],
@@ -161,35 +179,36 @@ def process_investory(manifest, max_depth) -> dict:
                 size = 0
 
             folder_count = folder.count("/")
-            depth = folder_count if max_depth == None or \
+            depth = folder_count if max_depth is None or \
                 folder_count <= max_depth else max_depth
 
             trim_base = 0
             for index in range(1, depth + 1):
                 trim_point = folder.index("/", trim_base)
                 trim_base = trim_point + 1
-                entry = "/" if index == 1 else folder[:trim_base] 
+                entry = "/" if index == 1 else folder[:trim_base]
 
-                if entry not in top_level_folders: 
-                    top_level_folders[entry] = copy(template)
+                if entry not in folders:
+                    folders[entry] = copy(template)
 
-                top_level_folders[entry]["Count"] += 1
-                top_level_folders[entry]["Size"] += size
+                folders[entry]["Count"] += 1
+                folders[entry]["Size"] += size
 
                 if not is_latest.as_py():
-                    top_level_folders[entry]["VerSize"] += size
+                    folders[entry]["VerSize"] += size
 
                 if is_delete.as_py():
-                    top_level_folders[entry]["DelSize"] += size
+                    folders[entry]["DelSize"] += size
 
     duration = datetime.now() - start
     print("Processed %d objects in %d seconds\n" % (object_count,
-                                                   duration.seconds))
+                                                    duration.seconds))
 
-    for folder, details in top_level_folders.items():
-        top_level_folders[folder]["AvgObj"] = details["Size"] / details["Count"]
+    for folder, details in folders.items():
+        folders[folder]["AvgObj"] = round(details["Size"] / details["Count"])
+        folders[folder] = urllib.parse.unquote(folders[folder])
 
-    return top_level_folders
+    return folders
 
 
 def print_results(results: dict) -> None:
@@ -202,11 +221,11 @@ def print_results(results: dict) -> None:
 
     for folder, details in results.items():
         print(f"{details['Count']:>15} |",
-             f"{convert_bytes(details['Size'], 'G'):>15} |",
-             f"{convert_bytes(details['DelSize'], 'G'):>15} |",
-             f"{convert_bytes(details['VerSize'], 'G'):>15} |",
-             f"{convert_bytes(details['AvgObj'], 'K'):>15} |",
-             urllib.parse.unquote(folder))
+              f"{convert_bytes(details['Size'], 'G'):>15} |",
+              f"{convert_bytes(details['DelSize'], 'G'):>15} |",
+              f"{convert_bytes(details['VerSize'], 'G'):>15} |",
+              f"{convert_bytes(details['AvgObj'], 'K'):>15} |",
+              folder)
 
 
 def parse_bucket_name(name):

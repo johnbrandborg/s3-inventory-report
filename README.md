@@ -1,4 +1,4 @@
-# s3-folder-size-report
+# S3 Inventory Report
 Processes S3 Inventory Manifests and generates a report about the folder size and object size average
 
 
