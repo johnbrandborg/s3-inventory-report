@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import argparse
 from copy import copy
 from datetime import datetime
 import gzip
@@ -10,49 +11,17 @@ import sys
 import urllib.parse
 
 from pyarrow import BufferReader, csv, orc, parquet
-from boto3 import client
+import boto3
 import botocore.exceptions
 
-file_cache = './cache'
-s3 = client('s3')
 
-
-def cli():
-    max_depth = None
-    out_file = None
-
-    if len(sys.argv) == 1:
-        print("S3 Folder Size Report\n" + "-" * 40 + "\n",
-              "-m s3://<bucket_name>/<prefix>/\n",
-              "-d <max_depth>  Optional",
-              "-o <file> Optional")
-        return 0
-
-    for index, argv in enumerate(sys.argv):
-        if "-m" == argv:
-            manifest_location = sys.argv[index + 1]
-        if "-d" == argv:
-            try:
-                max_depth = int(sys.argv[index + 1])
-            except ValueError:
-                print("ERROR: Maximum depth needs to be an integer",
-                      file=sys.stderr)
-                return 1
-        if "-o" == argv:
-            out_file = sys.argv[index + 1]
-
-    if not manifest_location:
-        print("ERROR: An S3 location for the manifest must be supplied",
-              file=sys.stderr)
-        return 1
+def main(manifest_location: str,
+         max_depth: int,
+         out_file: str,
+         cache_dir: str) -> None:
 
     manifest = load_manifest(manifest_location)
-
-    try:
-        results = process_investory(manifest, max_depth)
-    except KeyboardInterrupt:
-        print("\nExiting", file=sys.stderr)
-        return 1
+    results = process_investory(manifest, max_depth, cache_dir)
 
     if out_file:
         print(f"Writing results to out file {out_file}")
@@ -69,7 +38,7 @@ def cli():
 
             for folder, details in results.items():
                 writer.writerow((
-                    folder,
+                    urllib.parse.unquote(folder),
                     details["Count"],
                     details["Size"],
                     details["DelSize"],
@@ -80,7 +49,7 @@ def cli():
         print_results(results)
 
 
-def convert_bytes(size, unit=None):
+def convert_bytes(size: int, unit=None) -> str:
     if unit == "K":
         return str(round(size / 1024, 3)) + ' KB'
     elif unit == "M":
@@ -93,13 +62,16 @@ def convert_bytes(size, unit=None):
 
 def load_manifest(location: str) -> dict:
     print('Loading Inventory Manifest')
+
     if not location.endswith("/"):
-        location = location + "/"
+        # Handle if the JSON file is supplied rather than the folder prefix
+        location = location.replace("/manifest.json", "") + "/"
+
     bucket, prefix = parse_bucket_name(location)
-
+    json_key = prefix + "manifest.json"
     checksum_key = prefix + 'manifest.checksum'
-    json_key = prefix + 'manifest.json'
 
+    s3 = boto3.client("s3")
     try:
         manifest_json = s3.get_object(Bucket=bucket,
                                       Key=json_key).get('Body').read()
@@ -110,41 +82,55 @@ def load_manifest(location: str) -> dict:
         sys.exit(1)
 
     if md5(manifest_json).hexdigest() != manifest_checksum.decode().rstrip("\n"):
-        raise SystemError('The manifest failed the MD5 Check')
+        raise AssertionError('The manifest failed the MD5 Check')
 
     return loads(manifest_json)
 
 
-def process_investory(manifest, max_depth) -> dict:
+def collect_data(s3: boto3.client,
+                 bucket: str,
+                 file_spec: dict,
+                 cache_dir: str) -> bytes:
+
+    if cache_dir and cache_dir.endswith("/"):
+        cache_dir = cache_dir.rstrip("/")
+
+    local_path = cache_dir + file_spec['key'][file_spec['key'].rindex("/"):]
+
+    if cache_dir and not os.path.isdir(cache_dir):
+        os.mkdir(cache_dir)
+
+    if cache_dir and os.path.isfile(local_path):
+        print('Local:', local_path)
+        with open(local_path, 'rb') as file:
+            data = file.read()
+    else:
+        print('S3:', file_spec['key'])
+        file_object = s3.get_object(Bucket=bucket, Key=file_spec["key"])
+        data = file_object.get('Body').read()
+
+        if md5(data).hexdigest() != file_spec['MD5checksum']:
+            raise AssertionError('The inventory file failed the MD5 Check')
+
+        if cache_dir:
+            with open(local_path, 'wb') as file:
+                file.write(data)
+
+    return data
+
+
+def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
+    inventory_bucket = manifest['destinationBucket'].split(":::")[1]
     template = {"Count": 0, "DelSize": 0, "Size": 0, "VerSize": 0}
     folders = {"/": copy(template)}
     object_count = 0
 
-    if not os.path.isdir(file_cache):
-        os.mkdir(file_cache)
-
     print("Processing Inventory")
     start = datetime.now()
+    s3 = boto3.client("s3")
 
     for file in manifest["files"]:
-        inventory_bucket = manifest['destinationBucket'].split(":::")[1]
-        local_file = file_cache + file['key'][file['key'].rindex("/"):]
-
-        if os.path.isfile(local_file):
-            print('Local:', local_file)
-            with open(local_file, 'rb') as file:
-                data = file.read()
-        else:
-            print('S3:', file['key'])
-            file_object = s3.get_object(Bucket=inventory_bucket,
-                                        Key=file["key"])
-            data = file_object.get('Body').read()
-
-            if md5(data).hexdigest() != file['MD5checksum']:
-                raise SystemError('The inventory file failed the MD5 Check')
-
-            with open(local_file, 'wb') as file:
-                file.write(data)
+        data = collect_data(s3, inventory_bucket, file, cache_dir)
 
         if manifest["fileFormat"] == 'Parquet':
             table = parquet.read_table(BufferReader(data))
@@ -199,14 +185,13 @@ def process_investory(manifest, max_depth) -> dict:
 
                 if is_delete.as_py():
                     folders[entry]["DelSize"] += size
-
+        break
     duration = datetime.now() - start
     print("Processed %d objects in %d seconds\n" % (object_count,
                                                     duration.seconds))
 
     for folder, details in folders.items():
         folders[folder]["AvgObj"] = round(details["Size"] / details["Count"])
-        folders[folder] = urllib.parse.unquote(folders[folder])
 
     return folders
 
@@ -217,7 +202,7 @@ def print_results(results: dict) -> None:
           f"{'Ver Size':>16} |"
           f"{'Del Size':>16} |"
           f"{'Avg Object':>16} |"
-          " Folder\n", "-" * 120)
+          " Folder\n", "-" * 110)
 
     for folder, details in results.items():
         print(f"{details['Count']:>15} |",
@@ -225,13 +210,28 @@ def print_results(results: dict) -> None:
               f"{convert_bytes(details['DelSize'], 'G'):>15} |",
               f"{convert_bytes(details['VerSize'], 'G'):>15} |",
               f"{convert_bytes(details['AvgObj'], 'K'):>15} |",
-              folder)
+              urllib.parse.unquote(folder))
 
 
-def parse_bucket_name(name):
+def parse_bucket_name(name: str) -> tuple:
     name = name.lstrip("s3://")
     return (name[:name.index("/")], name[name.index("/"):].lstrip("/"))
 
 
 if __name__ == "__main__":
-    sys.exit(cli())
+    parser = argparse.ArgumentParser(description="S3 Inventory Report")
+    parser.add_argument("-c", default="", dest="cache_dir",
+                        help="Folder name for caching data files")
+    parser.add_argument("-d", type=int, dest="max_depth",
+                        help="The maximum depth folder to calculate sizing")
+    parser.add_argument("-m", dest="manifest", required=True,
+                        help="The S3 Folder storing the manifest file")
+    parser.add_argument("-o", dest="out_file",
+                        help="The local or S3 location to write the report")
+    args = parser.parse_args()
+
+    try:
+        main(args.manifest, args.max_depth, args.out_file, args.cache_dir)
+    except KeyboardInterrupt:
+        print("\nExiting", file=sys.stderr)
+        sys.exit(1)
