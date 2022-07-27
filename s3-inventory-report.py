@@ -149,7 +149,7 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
                 folder_count <= max_depth else max_depth
 
             trim_base = 0
-            for depth in range(0, set_depth):
+            for depth in range(0, set_depth + 1):
                 if depth > 0:
                     trim_point = folder.index("/", trim_base)
                     trim_base = trim_point + 1
