@@ -29,9 +29,10 @@ a out file is set a CSV file is created either locally or on S3.
 ```
 
 The CSV will have a header with the following fields:
- 1. Folder - Name of folder in the S3 Bucket
- 2. Count - Number of Objects in the folder
- 3. Size - Total size of the folder.  Current, NonCurrent, and deletion marked
- 4. DelSize - Total size of the Objects with deletion marker
- 5. VerSize - Total size of the Objects that are a noncurrent version
- 6. AvgObject - Average Object size of the objects in the Folder
+ 1. Folder - Name of folder in the S3 Bucket.
+ 2. Count - Number of Objects in the folder.
+ 3. Size - The total size of all Objects the folder in Bytes.
+ 4. DelSize - The size of the Objects with deletion marker only.
+ 5. VerSize - The size of the Objects that are a noncurrent version only.
+ 6. AvgObject - Average Object size of the objects in the Folder.
+ 7. Depth - The depth of the folder.

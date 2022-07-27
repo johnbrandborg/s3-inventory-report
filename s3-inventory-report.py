@@ -2,7 +2,6 @@
 
 import argparse
 from copy import copy
-import csv
 from datetime import datetime
 import gzip
 from hashlib import md5
@@ -11,7 +10,7 @@ import os
 import sys
 import urllib.parse
 
-from pyarrow import BufferReader, csv as pa_csv, orc, parquet
+from pyarrow import BufferReader, csv, orc, parquet
 import boto3
 import botocore.exceptions
 
@@ -25,27 +24,7 @@ def main(manifest_location: str,
     results = process_investory(manifest, max_depth, cache_dir)
 
     if out_file:
-        print(f"Writing results to out file {out_file}")
-        with open(out_file, "w") as csv_file:
-            writer = csv.writer(csv_file)
-            writer.writerow((
-                "Folder",
-                "Count",
-                "Size",
-                "DelSize",
-                "VerSize",
-                "AvgObject",
-                ))
-
-            for folder, details in results.items():
-                writer.writerow((
-                    urllib.parse.unquote(folder),
-                    details["Count"],
-                    details["Size"],
-                    details["DelSize"],
-                    details["VerSize"],
-                    details["AvgObj"],
-                ))
+        write_results(results, out_file)
     else:
         print_results(results)
 
@@ -68,7 +47,7 @@ def load_manifest(location: str) -> dict:
         # Handle if the JSON file is supplied rather than the folder prefix
         location = location.replace("/manifest.json", "") + "/"
 
-    bucket, prefix = parse_bucket_name(location)
+    bucket, prefix = parse_bucket_url(location)
     json_key = prefix + "manifest.json"
     checksum_key = prefix + 'manifest.checksum'
 
@@ -122,7 +101,7 @@ def collect_data(s3: boto3.client,
 
 def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
     inventory_bucket = manifest['destinationBucket'].split(":::")[1]
-    template = {"Count": 0, "DelSize": 0, "Size": 0, "VerSize": 0}
+    template = {"Count": 0, "DelSize": 0, "Size": 0, "VerSize": 0, "Depth": 0}
     folders = {"/": copy(template)}
     object_count = 0
 
@@ -146,8 +125,8 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
                 "is_delete_marker",
                 "size",
             ]
-            read_options = pa_csv.ReadOptions(column_names=csv_names)
-            table = pa_csv.read_csv(BufferReader(gzip.decompress(data)),
+            read_options = csv.ReadOptions(column_names=csv_names)
+            table = csv.read_csv(BufferReader(gzip.decompress(data)),
                                     read_options)
         else:
             raise ValueError("Unknown file format")
@@ -166,17 +145,21 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
                 size = 0
 
             folder_count = folder.count("/")
-            depth = folder_count if max_depth is None or \
+            set_depth = folder_count if max_depth is None or \
                 folder_count <= max_depth else max_depth
 
             trim_base = 0
-            for index in range(1, depth + 1):
-                trim_point = folder.index("/", trim_base)
-                trim_base = trim_point + 1
-                entry = "/" if index == 1 else folder[:trim_base]
+            for depth in range(0, set_depth):
+                if depth > 0:
+                    trim_point = folder.index("/", trim_base)
+                    trim_base = trim_point + 1
+                    entry = folder[:trim_base]
+                else:
+                    entry = "/"
 
                 if entry not in folders:
                     folders[entry] = copy(template)
+                    folders[entry]['Depth'] = depth
 
                 folders[entry]["Count"] += 1
                 folders[entry]["Size"] += size
@@ -186,7 +169,7 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
 
                 if is_delete.as_py():
                     folders[entry]["DelSize"] += size
-        break
+
     duration = datetime.now() - start
     print("Processed %d objects in %d seconds\n" % (object_count,
                                                     duration.seconds))
@@ -195,6 +178,11 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
         folders[folder]["AvgObj"] = round(details["Size"] / details["Count"])
 
     return folders
+
+
+def parse_bucket_url(url: str) -> tuple:
+    url = url.lstrip("s3://")
+    return (url[:url.index("/")], url[url.index("/"):].lstrip("/"))
 
 
 def print_results(results: dict) -> None:
@@ -214,9 +202,31 @@ def print_results(results: dict) -> None:
               urllib.parse.unquote(folder))
 
 
-def parse_bucket_name(name: str) -> tuple:
-    name = name.lstrip("s3://")
-    return (name[:name.index("/")], name[name.index("/"):].lstrip("/"))
+def write_results(results: dict, out_file: str) -> None:
+    print(f"Writing CSV results to {out_file}")
+
+    csv_data = 'Folder,Count,Size,DelSize,VerSize,AvgObject,Depth\n'
+    for folder, details in results.items():
+        row = f'{urllib.parse.unquote(folder)},' \
+              f'{details["Count"]},' \
+              f'{details["Size"]},' \
+              f'{details["DelSize"]},' \
+              f'{details["VerSize"]},' \
+              f'{details["AvgObj"]},' \
+              f'{details["Depth"]}\n'
+        csv_data += row
+
+    if out_file.startswith("s3://"):
+        s3 = boto3.client("s3")
+        bucket, key = parse_bucket_url(out_file)
+        try:
+            s3.put_object(Body=csv_data.encode(), Bucket=bucket, Key=key)
+        except botocore.exceptions.ClientError as error:
+            print("ERROR:", error, file=sys.stderr)
+            sys.exit(1)
+    else:
+        with open(out_file, "w") as csv_file:
+            csv_file.write(csv_data)
 
 
 if __name__ == "__main__":
