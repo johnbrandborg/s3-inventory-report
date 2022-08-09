@@ -31,17 +31,17 @@ def main(manifest_location: str,
 
 def convert_bytes(size: int, unit=None) -> str:
     if unit == "K":
-        return str(round(size / 1024, 3)) + ' KB'
+        return str(round(size / 1024, 3)) + " KB"
     elif unit == "M":
-        return str(round(size / (1024 * 1024), 3)) + ' MB'
+        return str(round(size / (1024 * 1024), 3)) + " MB"
     elif unit == "G":
-        return str(round(size / (1024 * 1024 * 1024), 3)) + ' GB'
+        return str(round(size / (1024 * 1024 * 1024), 3)) + " GB"
     else:
-        return str(size) + ' Bytes'
+        return str(size) + " Bytes"
 
 
 def load_manifest(location: str) -> dict:
-    print('Loading Inventory Manifest')
+    print("Loading Inventory Manifest")
 
     if not location.endswith("/"):
         # Handle if the JSON file is supplied rather than the folder prefix
@@ -49,20 +49,20 @@ def load_manifest(location: str) -> dict:
 
     bucket, prefix = parse_bucket_url(location)
     json_key = prefix + "manifest.json"
-    checksum_key = prefix + 'manifest.checksum'
+    checksum_key = prefix + "manifest.checksum"
 
     s3 = boto3.client("s3")
     try:
         manifest_json = s3.get_object(Bucket=bucket,
-                                      Key=json_key).get('Body').read()
+                                      Key=json_key).get("Body").read()
         manifest_checksum = s3.get_object(Bucket=bucket,
-                                          Key=checksum_key).get('Body').read()
+                                          Key=checksum_key).get("Body").read()
     except botocore.exceptions.ClientError as error:
         print("ERROR:", error, file=sys.stderr)
         sys.exit(1)
 
     if md5(manifest_json).hexdigest() != manifest_checksum.decode().rstrip("\n"):
-        raise AssertionError('The manifest failed the MD5 Check')
+        raise AssertionError("The manifest failed the MD5 Check")
 
     return loads(manifest_json)
 
@@ -75,32 +75,32 @@ def collect_data(s3: boto3.client,
     if cache_dir and cache_dir.endswith("/"):
         cache_dir = cache_dir.rstrip("/")
 
-    local_path = cache_dir + file_spec['key'][file_spec['key'].rindex("/"):]
+    local_path = cache_dir + file_spec["key"][file_spec["key"].rindex("/"):]
 
     if cache_dir and not os.path.isdir(cache_dir):
         os.mkdir(cache_dir)
 
     if cache_dir and os.path.isfile(local_path):
-        print('Local:', local_path)
-        with open(local_path, 'rb') as file:
+        print(local_path)
+        with open(local_path, "rb") as file:
             data = file.read()
     else:
-        print('S3:', file_spec['key'])
+        print(f"s3://{bucket}/{file_spec['key']}")
         file_object = s3.get_object(Bucket=bucket, Key=file_spec["key"])
-        data = file_object.get('Body').read()
+        data = file_object.get("Body").read()
 
-        if md5(data).hexdigest() != file_spec['MD5checksum']:
-            raise AssertionError('The inventory file failed the MD5 Check')
+        if md5(data).hexdigest() != file_spec["MD5checksum"]:
+            raise AssertionError("The inventory file failed the MD5 Check")
 
         if cache_dir:
-            with open(local_path, 'wb') as file:
+            with open(local_path, "wb") as file:
                 file.write(data)
 
     return data
 
 
 def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
-    inventory_bucket = manifest['destinationBucket'].split(":::")[1]
+    inventory_bucket = manifest["destinationBucket"].split(":::")[1]
     template = {"Count": 0, "DelSize": 0, "Size": 0, "VerSize": 0, "Depth": 0}
     folders = {"/": copy(template)}
     object_count = 0
@@ -112,11 +112,11 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
     for file in manifest["files"]:
         data = collect_data(s3, inventory_bucket, file, cache_dir)
 
-        if manifest["fileFormat"] == 'Parquet':
+        if manifest["fileFormat"] == "Parquet":
             table = parquet.read_table(BufferReader(data))
-        elif manifest["fileFormat"] == 'ORC':
+        elif manifest["fileFormat"] == "ORC":
             table = orc.read_table(BufferReader(data))
-        elif manifest["fileFormat"] == 'CSV':
+        elif manifest["fileFormat"] == "CSV":
             csv_names = [
                 "bucket",
                 "key",
@@ -132,10 +132,10 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
             raise ValueError("Unknown file format")
 
         for key, is_latest, is_delete, size in zip(
-                table['key'],
-                table['is_latest'],
-                table['is_delete_marker'],
-                table['size']):
+                table["key"],
+                table["is_latest"],
+                table["is_delete_marker"],
+                table["size"]):
 
             object_count += 1
             folder = key.as_py()
@@ -159,7 +159,7 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
 
                 if entry not in folders:
                     folders[entry] = copy(template)
-                    folders[entry]['Depth'] = depth
+                    folders[entry]["Depth"] = depth
 
                 folders[entry]["Count"] += 1
                 folders[entry]["Size"] += size
@@ -205,15 +205,15 @@ def print_results(results: dict) -> None:
 def write_results(results: dict, out_file: str) -> None:
     print(f"Writing CSV results to {out_file}")
 
-    csv_data = 'Folder,Count,Size,DelSize,VerSize,AvgObject,Depth\n'
+    csv_data = "Folder,Count,Size,DelSize,VerSize,AvgObject,Depth\n"
     for folder, details in results.items():
-        row = f'{urllib.parse.unquote(folder)},' \
-              f'{details["Count"]},' \
-              f'{details["Size"]},' \
-              f'{details["DelSize"]},' \
-              f'{details["VerSize"]},' \
-              f'{details["AvgObj"]},' \
-              f'{details["Depth"]}\n'
+        row = f"{urllib.parse.unquote(folder)}," \
+              f"{details['Count']}," \
+              f"{details['Size']}," \
+              f"{details['DelSize']}," \
+              f"{details['VerSize']}," \
+              f"{details['AvgObj']}," \
+              f"{details['Depth']}\n"
         csv_data += row
 
     if out_file.startswith("s3://"):
