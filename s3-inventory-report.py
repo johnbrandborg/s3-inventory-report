@@ -1,25 +1,25 @@
 #!/usr/bin/env python
 
 import argparse
-from copy import copy
-from datetime import datetime
 import gzip
-from hashlib import md5
-from json import loads
 import os
 import sys
 import urllib.parse
+from copy import copy
+from datetime import datetime
+from hashlib import md5
+from json import loads
 
-from pyarrow import BufferReader, csv, orc, parquet
 import boto3
 import botocore.exceptions
+from pyarrow import BufferReader, csv, orc, Table, parquet  # pylint: disable=E0401
 
 
-def main(manifest_location: str,
-         max_depth: int,
-         out_file: str,
-         cache_dir: str) -> None:
-
+def main(manifest_location: str, max_depth: int, out_file: str, cache_dir: str) -> None:
+    """
+    Main function for the CLI to interact with.  Could be used to Interact
+    with from other modules too.
+    """
     manifest = load_manifest(manifest_location)
     results = process_investory(manifest, max_depth, cache_dir)
 
@@ -30,17 +30,26 @@ def main(manifest_location: str,
 
 
 def convert_bytes(size: int, unit=None) -> str:
+    """
+    Takes a integer and converts it to a data 'size' formatted string
+    """
     if unit == "K":
         return str(round(size / 1024, 3)) + " KB"
-    elif unit == "M":
+
+    if unit == "M":
         return str(round(size / (1024 * 1024), 3)) + " MB"
-    elif unit == "G":
+
+    if unit == "G":
         return str(round(size / (1024 * 1024 * 1024), 3)) + " GB"
-    else:
-        return str(size) + " Bytes"
+
+    return str(size) + " Bytes"
 
 
 def load_manifest(location: str) -> dict:
+    """
+    Loads the S3 Inventory manifest file, and performs a MD5 check. Once
+    completed, the JSON is deserialised into a Dictionary.
+    """
     print("Loading Inventory Manifest")
 
     if not location.endswith("/"):
@@ -53,10 +62,8 @@ def load_manifest(location: str) -> dict:
 
     s3 = boto3.client("s3")
     try:
-        manifest_json = s3.get_object(Bucket=bucket,
-                                      Key=json_key).get("Body").read()
-        manifest_checksum = s3.get_object(Bucket=bucket,
-                                          Key=checksum_key).get("Body").read()
+        manifest_json = s3.get_object(Bucket=bucket, Key=json_key).get("Body").read()
+        manifest_checksum = s3.get_object(Bucket=bucket, Key=checksum_key).get("Body").read()
     except botocore.exceptions.ClientError as error:
         print("ERROR:", error, file=sys.stderr)
         sys.exit(1)
@@ -67,15 +74,15 @@ def load_manifest(location: str) -> dict:
     return loads(manifest_json)
 
 
-def collect_data(s3: boto3.client,
-                 bucket: str,
-                 file_spec: dict,
-                 cache_dir: str) -> bytes:
-
+def collect_data(s3: boto3.client, bucket: str, file_spec: dict, cache_dir: str) -> bytes:
+    """
+    Downsload files from S3 and returns there contents.  If a cache directory
+    is supplied the file is stored locally.
+    """
     if cache_dir and cache_dir.endswith("/"):
         cache_dir = cache_dir.rstrip("/")
 
-    local_path = cache_dir + file_spec["key"][file_spec["key"].rindex("/"):]
+    local_path = cache_dir + file_spec["key"][file_spec["key"].rindex("/") :]
 
     if cache_dir and not os.path.isdir(cache_dir):
         os.mkdir(cache_dir)
@@ -100,10 +107,14 @@ def collect_data(s3: boto3.client,
 
 
 def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
+    """
+    Takes the S3 Inventory Manifest and downloads the necessary files. With
+    the data the folder references are aggregrated, are the results returned.
+    """
     inventory_bucket = manifest["destinationBucket"].split(":::")[1]
     template = {"Count": 0, "DelSize": 0, "Size": 0, "VerSize": 0, "Depth": 0}
     folders = {"/": copy(template)}
-    object_count = 0
+    objects = 0
 
     print("Processing Inventory")
     start = datetime.now()
@@ -125,95 +136,120 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
                 "is_delete_marker",
                 "size",
             ]
-            read_options = csv.ReadOptions(column_names=csv_names)
-            table = csv.read_csv(BufferReader(gzip.decompress(data)),
-                                    read_options)
+            table = csv.read_csv(BufferReader(gzip.decompress(data)), csv.ReadOptions(column_names=csv_names))
         else:
             raise ValueError("Unknown file format")
 
-        for key, is_latest, is_delete, size in zip(
-                table["key"],
-                table["is_latest"],
-                table["is_delete_marker"],
-                table["size"]):
-
-            object_count += 1
-            folder = key.as_py()
-            size = size.as_py()
-
-            if not size:
-                size = 0
-
-            folder_count = folder.count("/")
-            set_depth = folder_count if max_depth is None or \
-                folder_count <= max_depth else max_depth
-
-            trim_base = 0
-            for depth in range(0, set_depth + 1):
-                if depth > 0:
-                    trim_point = folder.index("/", trim_base)
-                    trim_base = trim_point + 1
-                    entry = folder[:trim_base]
-                else:
-                    entry = "/"
-
-                if entry not in folders:
-                    folders[entry] = copy(template)
-                    folders[entry]["Depth"] = depth
-
-                folders[entry]["Count"] += 1
-                folders[entry]["Size"] += size
-
-                if not is_latest.as_py():
-                    folders[entry]["VerSize"] += size
-
-                if is_delete.as_py():
-                    folders[entry]["DelSize"] += size
+        objects += aggregate_folders(table, folders, max_depth, template)
 
     duration = datetime.now() - start
-    print("Processed %d objects in %d seconds\n" % (object_count,
-                                                    duration.seconds))
+    print(f"Processed {objects} objects in {duration.seconds} seconds\n")
 
-    for folder, details in folders.items():
-        folders[folder]["AvgObj"] = round(details["Size"] / details["Count"])
+    for details in folders.values():
+        details["AvgObj"] = round(details["Size"] / details["Count"])
 
     return folders
 
 
+def aggregate_folders(table: Table, folders: dict, max_depth: int, template: dict) -> int:
+    """
+    A pyarrow Table of the s3 inventory data is taken and aggregated by augmenting
+    a dictionary that holds the folder data.  If a max depth is supplied it will
+    be honored, otherwise all folders are aggregated.
+
+    The number of objects aggregated is counted and returned.
+    """
+    count = 0
+
+    for key, is_latest, is_delete, size in zip(
+        table["key"], table["is_latest"], table["is_delete_marker"], table["size"]
+    ):
+        count += 1
+        folder = key.as_py()
+        size = size.as_py()
+
+        if not size:
+            size = 0
+
+        depth = folder.count("/")
+        if isinstance(max_depth, int) and depth >= max_depth:
+            depth = max_depth
+
+        trim_base = 0
+        for depth in range(0, depth + 1):
+            if depth > 0:
+                trim_point = folder.index("/", trim_base)
+                trim_base = trim_point + 1
+                entry = folder[:trim_base]
+            else:
+                entry = "/"
+
+            if entry not in folders:
+                folders[entry] = copy(template)
+                folders[entry]["Depth"] = depth
+
+            folders[entry]["Count"] += 1
+            folders[entry]["Size"] += size
+
+            if not is_latest.as_py():
+                folders[entry]["VerSize"] += size
+
+            if is_delete.as_py():
+                folders[entry]["DelSize"] += size
+
+    return count
+
+
 def parse_bucket_url(url: str) -> tuple:
+    """
+    Takes a S3 URL and returns a tuple containing the bucket, and key
+    """
     url = url.lstrip("s3://")
-    return (url[:url.index("/")], url[url.index("/"):].lstrip("/"))
+    return (url[: url.index("/")], url[url.index("/") :].lstrip("/"))
 
 
 def print_results(results: dict) -> None:
-    print(f"{'Count':>15} |"
-          f"{'Total Size':>16} |"
-          f"{'Ver Size':>16} |"
-          f"{'Del Size':>16} |"
-          f"{'Avg Object':>16} |"
-          " Folder\n", "-" * 110)
+    """
+    Console print the data from the inventory processing.
+    """
+    print(
+        f"{'Count':>15} |"
+        f"{'Total Size':>16} |"
+        f"{'Ver Size':>16} |"
+        f"{'Del Size':>16} |"
+        f"{'Avg Object':>16} |"
+        " Folder\n",
+        "-" * 110,
+    )
 
     for folder, details in results.items():
-        print(f"{details['Count']:>15} |",
-              f"{convert_bytes(details['Size'], 'G'):>15} |",
-              f"{convert_bytes(details['DelSize'], 'G'):>15} |",
-              f"{convert_bytes(details['VerSize'], 'G'):>15} |",
-              f"{convert_bytes(details['AvgObj'], 'K'):>15} |",
-              urllib.parse.unquote(folder))
+        print(
+            f"{details['Count']:>15} |",
+            f"{convert_bytes(details['Size'], 'G'):>15} |",
+            f"{convert_bytes(details['DelSize'], 'G'):>15} |",
+            f"{convert_bytes(details['VerSize'], 'G'):>15} |",
+            f"{convert_bytes(details['AvgObj'], 'K'):>15} |",
+            urllib.parse.unquote(folder),
+        )
 
 
 def write_results(results: dict, out_file: str) -> None:
+    """
+    Writes the data from the inventory out to either local disk or S3.
+    """
     print(f"Writing CSV results to {out_file}")
 
     csv_data = "Folder,Count,Size,DelSize,VerSize,AvgObject,Depth\n"
     for folder, details in results.items():
-        row = f"{urllib.parse.unquote(folder)}," \
-              f"{details['Count']}," \
-              f"{details['Size']}," \
-              f"{details['DelSize']}," \
-              f"{details['VerSize']}," \
-              f"{details['AvgObj']}," \
-              f"{details['Depth']}\n"
+        row = (
+            f"{urllib.parse.unquote(folder)},"
+            f"{details['Count']},"
+            f"{details['Size']},"
+            f"{details['DelSize']},"
+            f"{details['VerSize']},"
+            f"{details['AvgObj']},"
+            f"{details['Depth']}\n"
+        )
         csv_data += row
 
     if out_file.startswith("s3://"):
@@ -231,14 +267,10 @@ def write_results(results: dict, out_file: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="S3 Inventory Report")
-    parser.add_argument("-c", default="", dest="cache_dir",
-                        help="Folder name for caching data files")
-    parser.add_argument("-d", type=int, dest="max_depth",
-                        help="The maximum depth folder to calculate sizing")
-    parser.add_argument("-m", dest="manifest", required=True,
-                        help="The S3 Folder storing the manifest file")
-    parser.add_argument("-o", dest="out_file",
-                        help="The local or S3 location to write the report")
+    parser.add_argument("-c", default="", dest="cache_dir", help="Folder name for caching data files")
+    parser.add_argument("-d", type=int, dest="max_depth", help="The maximum depth folder to calculate sizing")
+    parser.add_argument("-m", dest="manifest", required=True, help="The S3 Folder storing the manifest file")
+    parser.add_argument("-o", dest="out_file", help="The local or S3 location to write the report")
     args = parser.parse_args()
 
     try:
