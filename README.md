@@ -21,7 +21,7 @@ This tool is a simple CLI script. By default the information is displayed on the
 a out file is set a CSV file is created either locally or on S3.
 
 ```shell
-./s3-inventory-report.py \
+./s3_inventory_report.py \
     -m s3://inventory-bucket/production-bucket/Daily/2022-07-24T00-00Z/ \
     -o s3://archive-bucket/2022-07-24.csv \
     -d 3 \

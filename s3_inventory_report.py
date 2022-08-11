@@ -12,7 +12,7 @@ from json import loads
 
 import boto3
 import botocore.exceptions
-from pyarrow import BufferReader, csv, orc, Table, parquet  # pylint: disable=E0401
+from pyarrow import BufferReader, Table, csv, orc, parquet
 
 
 def main(manifest_location: str, max_depth: int, out_file: str, cache_dir: str) -> None:
@@ -63,7 +63,9 @@ def load_manifest(location: str) -> dict:
     s3 = boto3.client("s3")
     try:
         manifest_json = s3.get_object(Bucket=bucket, Key=json_key).get("Body").read()
-        manifest_checksum = s3.get_object(Bucket=bucket, Key=checksum_key).get("Body").read()
+        manifest_checksum = (
+            s3.get_object(Bucket=bucket, Key=checksum_key).get("Body").read()
+        )
     except botocore.exceptions.ClientError as error:
         print("ERROR:", error, file=sys.stderr)
         sys.exit(1)
@@ -74,7 +76,9 @@ def load_manifest(location: str) -> dict:
     return loads(manifest_json)
 
 
-def collect_data(s3: boto3.client, bucket: str, file_spec: dict, cache_dir: str) -> bytes:
+def collect_data(
+    s3: boto3.client, bucket: str, file_spec: dict, cache_dir: str
+) -> bytes:
     """
     Downsload files from S3 and returns there contents.  If a cache directory
     is supplied the file is stored locally.
@@ -119,14 +123,15 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
     print("Processing Inventory")
     start = datetime.now()
     s3 = boto3.client("s3")
+    needed_columns = ["key", "is_latest", "is_delete_marker", "size"]
 
     for file in manifest["files"]:
         data = collect_data(s3, inventory_bucket, file, cache_dir)
 
         if manifest["fileFormat"] == "Parquet":
-            table = parquet.read_table(BufferReader(data))
+            table = parquet.read_table(BufferReader(data), columns=needed_columns)
         elif manifest["fileFormat"] == "ORC":
-            table = orc.read_table(BufferReader(data))
+            table = orc.read_table(BufferReader(data), columns=needed_columns)
         elif manifest["fileFormat"] == "CSV":
             csv_names = [
                 "bucket",
@@ -136,7 +141,11 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
                 "is_delete_marker",
                 "size",
             ]
-            table = csv.read_csv(BufferReader(gzip.decompress(data)), csv.ReadOptions(column_names=csv_names))
+            table = csv.read_csv(
+                BufferReader(gzip.decompress(data)),
+                csv.ReadOptions(column_names=csv_names),
+                convert_options=csv.ConvertOptions(include_columns=needed_columns),
+            )
         else:
             raise ValueError("Unknown file format")
 
@@ -151,7 +160,9 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
     return folders
 
 
-def aggregate_folders(table: Table, folders: dict, max_depth: int, template: dict) -> int:
+def aggregate_folders(
+    table: Table, folders: dict, max_depth: int, template: dict
+) -> int:
     """
     A pyarrow Table of the s3 inventory data is taken and aggregated by augmenting
     a dictionary that holds the folder data.  If a max depth is supplied it will
@@ -267,10 +278,24 @@ def write_results(results: dict, out_file: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="S3 Inventory Report")
-    parser.add_argument("-c", default="", dest="cache_dir", help="Folder name for caching data files")
-    parser.add_argument("-d", type=int, dest="max_depth", help="The maximum depth folder to calculate sizing")
-    parser.add_argument("-m", dest="manifest", required=True, help="The S3 Folder storing the manifest file")
-    parser.add_argument("-o", dest="out_file", help="The local or S3 location to write the report")
+    parser.add_argument(
+        "-c", default="", dest="cache_dir", help="Folder name for caching data files"
+    )
+    parser.add_argument(
+        "-d",
+        type=int,
+        dest="max_depth",
+        help="The maximum depth folder to calculate sizing",
+    )
+    parser.add_argument(
+        "-m",
+        dest="manifest",
+        required=True,
+        help="The S3 Folder storing the manifest file",
+    )
+    parser.add_argument(
+        "-o", dest="out_file", help="The local or S3 location to write the report"
+    )
     args = parser.parse_args()
 
     try:
