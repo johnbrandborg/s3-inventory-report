@@ -15,6 +15,10 @@ import botocore.exceptions
 from pyarrow import BufferReader, Table, csv, orc, parquet
 
 
+# Batches Parquet Files for lower memory usage
+LOW_MEMORY = True
+
+
 def main(manifest_location: str, max_depth: int, out_file: str, cache_dir: str) -> None:
     """
     Main function for the CLI to interact with.  Could be used to Interact
@@ -128,6 +132,13 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
     for file in manifest["files"]:
         data = collect_data(s3, inventory_bucket, file, cache_dir)
 
+        if manifest["fileFormat"] == "Parquet" and LOW_MEMORY:
+            parquet_file = parquet.ParquetFile(BufferReader(data))
+
+            for table in parquet_file.iter_batches(columns=needed_columns):
+                objects += aggregate_folders(table, folders, max_depth, template)
+            continue
+
         if manifest["fileFormat"] == "Parquet":
             table = parquet.read_table(BufferReader(data), columns=needed_columns)
         elif manifest["fileFormat"] == "ORC":
@@ -147,7 +158,7 @@ def process_investory(manifest: dict, max_depth: int, cache_dir: str) -> dict:
                 convert_options=csv.ConvertOptions(include_columns=needed_columns),
             )
         else:
-            raise ValueError("Unknown file format")
+            raise TypeError("Only Parquet, ORC, and CSV formats are supported")
 
         objects += aggregate_folders(table, folders, max_depth, template)
 
