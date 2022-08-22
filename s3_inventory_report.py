@@ -58,7 +58,7 @@ def load_manifest(location: str) -> dict:
 
     if not location.endswith("/"):
         # Handle if the JSON file is supplied rather than the folder prefix
-        location = location.replace("/manifest.json", "") + "/"
+        location = location.replace("/manifest.json", "/")
 
     bucket, prefix = parse_bucket_url(location)
     json_key = prefix + "manifest.json"
@@ -84,7 +84,7 @@ def collect_data(
     s3: boto3.client, bucket: str, file_spec: dict, cache_dir: str
 ) -> bytes:
     """
-    Downsload files from S3 and returns there contents.  If a cache directory
+    Download files from S3 and returns there contents.  If a cache directory
     is supplied the file is stored locally.
     """
     if cache_dir and cache_dir.endswith("/"):
