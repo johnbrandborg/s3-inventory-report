@@ -1,3 +1,6 @@
+:exclamation: This repository has been archived. I recommend using S3 Inventory instead.
+https://docs.aws.amazon.com/AmazonS3/latest/userguide/storage-inventory.html
+
 # S3 Inventory Report
 Processes S3 Inventory Manifests and generates a report about the folder size and object size average
 
